@@ -1,0 +1,89 @@
+name: Build SkinN64 Clean V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Recuperer les fichiers SkinN64
+        uses: actions/checkout@v5
+
+      - name: Installer Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Liberer de la place
+        run: |
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/25.* /usr/local/lib/android/sdk/ndk/27.* /usr/local/lib/android/sdk/ndk/28.* || true
+
+      - name: Telecharger la base libre Mupen64Plus-AE
+        run: |
+          git clone --filter=blob:none https://github.com/mupen64plus-ae/mupen64plus-ae.git emulator
+          git -C emulator checkout 33bf7021549d7873e976884370fbd1a8e7333bc7
+
+      - name: Extraire et installer SkinN64 Clean V2
+        run: |
+          marker=$(find . -maxdepth 5 -type f -name SKINN64_CLEAN_V2 -print -quit)
+          if [ -z "$marker" ]; then
+            archive=$(find . -maxdepth 2 -type f -iname '*SkinN64*Clean*V2*.zip' -print -quit)
+            if [ -z "$archive" ]; then
+              echo "ERREUR : SkinN64-Clean-V2.zip est introuvable a la racine du depot."
+              exit 1
+            fi
+            mkdir extracted-v2
+            unzip -q "$archive" -d extracted-v2
+            marker=$(find extracted-v2 -maxdepth 5 -type f -name SKINN64_CLEAN_V2 -print -quit)
+          fi
+          if [ -z "$marker" ]; then
+            echo "ERREUR : marqueur SKINN64_CLEAN_V2 absent du ZIP."
+            exit 1
+          fi
+          package_dir=$(dirname "$marker")
+          test -d "$package_dir/overlay/app" || { echo "ERREUR : overlay/app absent."; exit 1; }
+          cp -a "$package_dir/overlay/." emulator/
+          rm -f emulator/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          rm -f emulator/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          grep -q 'android:pageSizeCompat="enabled"' emulator/app/src/main/AndroidManifest.xml || {
+            echo "ERREUR : correctif Android 16 / 16 Ko absent."
+            exit 1
+          }
+
+      - name: Configurer Android
+        run: printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > emulator/local.properties
+
+      - name: Compiler APK ARM64 compatible Android 16
+        working-directory: emulator
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:clean :app:assembleDebug --no-daemon --stacktrace --no-build-cache
+
+      - name: Verifier et preparer APK
+        run: |
+          mkdir -p apk-result
+          apk=$(find emulator/app/build/outputs/apk -type f -name '*.apk' -print -quit)
+          if [ -z "$apk" ]; then
+            echo "ERREUR : la compilation n'a produit aucun APK."
+            exit 1
+          fi
+          cp "$apk" apk-result/SkinN64-Clean-V2-ARM64.apk
+          unzip -p apk-result/SkinN64-Clean-V2-ARM64.apk AndroidManifest.xml | strings | grep -q pageSizeCompat || {
+            echo "ERREUR : le manifeste final ne contient pas le correctif 16 Ko."
+            exit 1
+          }
+          ls -lh apk-result/SkinN64-Clean-V2-ARM64.apk
+
+      - name: Publier APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkinN64-Clean-V2-ARM64
+          path: apk-result/SkinN64-Clean-V2-ARM64.apk
+          if-no-files-found: error
+          retention-days: 30
